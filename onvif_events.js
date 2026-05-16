@@ -33,7 +33,7 @@
                 
                 if (onvifStatus !== "connected" && node.eventListener) {
                     // When the device isn't connected anymore, stop listening to events from the camera
-                    node.deviceConfig.cam.removeListener('events', node.eventListener);
+                    node.deviceConfig.cam.removeListener('event', node.eventListener);
                     node.eventListener = null;
                 }
             }

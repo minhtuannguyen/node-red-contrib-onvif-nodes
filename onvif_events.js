@@ -128,6 +128,7 @@
 
                             var outputMsg = {
                                 topic: eventTopic,
+                                payload: {},
                                 time: camMessage.message.message.$.UtcTime,
                                 property: camMessage.message.message.$.PropertyOperation // Initialized, Deleted or Changed but missing/undefined on the Avigilon 4 channel encoder
                             };
@@ -152,6 +153,7 @@
                                         value: camMessage.message.message.source.simpleItem.$.Value
                                     }
                                 }
+                                outputMsg.payload.source = outputMsg.source;
                             }
                             
                             //KEY
@@ -176,12 +178,14 @@
                                         value: camMessage.message.message.data.simpleItem.$.Value
                                     }
                                 }
+                                outputMsg.payload.data = outputMsg.data;
                             }
                             else if (camMessage.message.message.data && camMessage.message.message.data.elementItem) {
                                 outputMsg.data = {
                                     dataName: 'elementItem',
                                     dataValue: JSON.stringify(camMessage.message.message.data.elementItem)
                                 }
+                                outputMsg.payload.data = outputMsg.data;
                             }
 
                             // As soon as we get an event from the camera, we will send it to the output of this node

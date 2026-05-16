@@ -200,9 +200,10 @@
                                 // Non-standard camera (e.g. Tapo C225, sends only "Initialized" events
                                 // continuously while motion is active, never "Changed" events).
                                 // Strategy:
-                                //   - Track if ANY event in a 300ms window has a true detection value
+                                //   - Reset watchdog immediately on first event of each new batch
+                                //     (prevents race: watchdog and next batch arriving at the same ms)
                                 //   - Emit ONE message (detected:true) when detection starts
-                                //   - Reset a 5s watchdog on every batch; fire detected:false when silent
+                                //   - 10s watchdog fires detected:false when camera goes silent
                                 if (rawDetected === true) {
                                     node.eventBatchHasTrue[cacheKey] = true;
                                 }
@@ -210,6 +211,19 @@
                                 if (!node.eventBatchActive[cacheKey]) {
                                     node.eventBatchActive[cacheKey] = true;
                                     var batchMsg = outputMsg;
+
+                                    // If motion is already active, reset the watchdog NOW (on the
+                                    // first event of this batch) rather than waiting 300ms for the
+                                    // debounce. This prevents the watchdog firing at the same moment
+                                    // as the next batch when the camera's batch interval ≈ watchdog.
+                                    if (node.eventMotionActive[cacheKey]) {
+                                        clearTimeout(node.eventWatchdogTimers[cacheKey]);
+                                        node.eventWatchdogTimers[cacheKey] = setTimeout(function() {
+                                            node.eventMotionActive[cacheKey] = false;
+                                            node.send({ topic: eventTopic, payload: { detected: false, property: 'timeout' } });
+                                        }, 10000);
+                                    }
+
                                     node.eventDebounceTimers[cacheKey] = setTimeout(function() {
                                         node.eventBatchActive[cacheKey] = false;
                                         var detected = node.eventBatchHasTrue[cacheKey];
@@ -217,19 +231,15 @@
 
                                         if (detected && !node.eventMotionActive[cacheKey]) {
                                             // First detection in this presence window: emit once
+                                            // and start the watchdog for the first time.
                                             node.eventMotionActive[cacheKey] = true;
                                             batchMsg.payload.detected = true;
                                             node.send(batchMsg);
-                                        }
-
-                                        if (node.eventMotionActive[cacheKey]) {
-                                            // Reset watchdog — camera sends every ~1s while active;
-                                            // 5s silence means the person has left
                                             clearTimeout(node.eventWatchdogTimers[cacheKey]);
                                             node.eventWatchdogTimers[cacheKey] = setTimeout(function() {
                                                 node.eventMotionActive[cacheKey] = false;
                                                 node.send({ topic: eventTopic, payload: { detected: false, property: 'timeout' } });
-                                            }, 5000);
+                                            }, 10000);
                                         }
                                     }, 300);
                                 }

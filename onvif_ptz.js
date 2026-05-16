@@ -112,7 +112,7 @@
             // TODO check whether the node.token exists in the ONVIF device
             
             // Check whether a 'pan_speed' value is specified in the input message
-            if (msg.hasOwnProperty('pan_speed') || msg.pan_speed < -1.0 || msg.pan_speed > 1.0) {
+            if (msg.hasOwnProperty('pan_speed')) {
                 if (isNaN(msg.pan_speed)) {
                     node.error('The msg.pan_speed value should be a number between -1.0 and 1.0');
                 }
@@ -122,7 +122,7 @@
             }
             
             // Check whether a 'tilt_speed' value is specified in the input message
-            if (msg.hasOwnProperty('tilt_speed') || msg.tilt_speed < -1.0 || msg.tilt_speed > 1.0) {
+            if (msg.hasOwnProperty('tilt_speed')) {
                 if (isNaN(msg.tilt_speed)) {
                     node.error('The msg.tilt_speed value should be a number between -1.0 and 1.0');
                 }
@@ -346,25 +346,17 @@
                             'profileToken': profileToken
                         };
                         
-                        // We will not ask the user to specify the preset token in the input message, to avoid that the preset tokens will
-                        // need to be stored somewhere in the Node-Red flow.  Instead the user can specify a preset NAME, and we will lookup
-                        // to which existing preset token this name corresponds...
+                        // Look up the preset token by name, then remove it
                         node.deviceConfig.cam.getPresets(options, function(err, stream, xml) {
-                            // Get the preset token of the specified preset name
                             var presetToken = stream[presetName];
-                            
-                            // When the preset token exists, we are dealing with an already existing preset.
-                            // Then pass the preset token to the device, so it will UPDATE the existing preset.
-                            // When the preset token is not passed to the device, the device will create a NEW preset (and a new preset token).
-                            if (presetToken) {
-                                options.presetToken = presetToken;
+
+                            if (!presetToken) {
+                                node.error("Preset with name '" + presetName + "' does not exist");
+                                return;
                             }
 
-                            options.presetName = presetName;
- 
-                            // Create/update the preset, based on the preset token.  The device will save the current camera parameters
-                            // (XY coordinates, zoom level and a focus adjustment) so that the device can move afterwards to that saved 
-                            // preset position (via the GotoPreset action).
+                            options.presetToken = presetToken;
+
                             node.deviceConfig.cam.removePreset(options, function(err, stream, xml) {
                                 utils.handleResult(node, err, stream, xml, newMsg);
                             });
@@ -383,9 +375,9 @@
                             // Get the preset token of the specified preset name
                             var preset = stream[presetName];
                             
-                            // When the preset token doesn't exists, we cannot goto it ...
+                            // When the preset token doesn't exist, we cannot go to it
                             if (!preset) {
-                                console.warn("Preset token with name " + presetName + " does not exist.");
+                                node.error("Preset with name '" + presetName + "' does not exist");
                                 return;
                             }
                             

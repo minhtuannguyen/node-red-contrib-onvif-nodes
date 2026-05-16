@@ -90,46 +90,39 @@
                         }
                         
                         // Overwrite the device status text
-                        node.status({fill:"green",shape:"dot",text:"listening"}); 
+                        node.status({fill:"green",shape:"dot",text:"listening"});
+
+                        // Per-topic state for debounce and watchdog timer
+                        node.eventDebounceTimers  = {};  // short debounce: batch simultaneous cell events
+                        node.eventWatchdogTimers  = {};  // long watchdog: detect motion stopped
+                        node.eventMotionActive    = {};  // tracks whether motion is currently active
+                        node.eventBatchHasTrue    = {};  // tracks if any event in debounce window had detection:true
+                        node.eventBatchActive     = {};  // tracks if a debounce timer is currently running
                         
                         node.eventListener = function(camMessage) {
-                            var sourceName  = null;
-                            var sourceValue = null;
-                            var dataName    = null;
-                            var dataValue   = null;
-                            
-                            // Events have a Topic
-                            // Events have (optionally) a Source, a Key and Data fields
-                            // The Source,Key and Data fields can be single items or an array of items
-                            // The Source,Key and Data fields can be of type SimpleItem or a Complex Item
-                            //    - Topic
-                            //    - Message/Message/$
-                            //    - Message/Message/Source...
-                            //    - Message/Message/Key...
-                            //    - Message/Message/Data/SimpleItem/[index]/$/name   (array of items)
-                            // OR - Message/Message/Data/SimpleItem/$/name   (single item)
-                            //    - Message/Message/Data/SimpleItem/[index]/$/value   (array of items)
-                            // OR - Message/Message/Data/SimpleItem/$/value   (single item)
+                            // Strip namespaces from topic (e.g. tns1:RuleEngine/tns1:PeopleDetector/People)
+                            var parts = camMessage.topic._.split('/');
+                            var eventTopic = '';
+                            for (var i = 0; i < parts.length; i++) {
+                                eventTopic += (i ? '/' : '') + parts[i].split(':').pop();
+                            }
 
-                            var eventTopic = camMessage.topic._;
-                            
-                            // Strip the namespaces from the topic (e.g. tns1:MediaControl/tnsavg:ConfigurationUpdateAudioEncCfg)
-                            // Split on '/', then remove any namespace for each part, and at the end recombine parts that were split with '/'
-                            let parts = eventTopic.split('/');
-                            eventTopic = "";
-                            for (var index = 0; index < parts.length; index++) {
-                                var stringNoNamespace = parts[index].split(':').pop();
-                                if (eventTopic.length == 0) {
-                                    eventTopic += stringNoNamespace;
-                                } else {
-                                    eventTopic += '/' + stringNoNamespace;
-                                }
+                            // Performance early-exit: once a batch has a confirmed true detection
+                            // and motion is already reported as active, skip all further parsing.
+                            // The debounce timer already running will reset the watchdog.
+                            if (node.eventBatchActive[eventTopic] &&
+                                node.eventBatchHasTrue[eventTopic] &&
+                                node.eventMotionActive[eventTopic]) {
+                                return;
                             }
 
                             var outputMsg = {
                                 topic: eventTopic,
-                                time: camMessage.message.message.$.UtcTime,
-                                property: camMessage.message.message.$.PropertyOperation // Initialized, Deleted or Changed but missing/undefined on the Avigilon 4 channel encoder
+                                payload: {
+                                    detected: null,
+                                    time: camMessage.message.message.$.UtcTime,
+                                    property: camMessage.message.message.$.PropertyOperation
+                                }
                             };
 
                             // Only handle simpleItem
@@ -141,57 +134,106 @@
                             if (camMessage.message.message.source && camMessage.message.message.source.simpleItem) {
                                 if (Array.isArray(camMessage.message.message.source.simpleItem)) {
                                     // TODO : currently we only process the first event source item ...
-                                    outputMsg.source = {
+                                    outputMsg.payload.source = {
                                         name:  camMessage.message.message.source.simpleItem[0].$.Name,
                                         value: camMessage.message.message.source.simpleItem[0].$.Value
                                     }
                                 }
                                 else {
-                                    outputMsg.source = {
+                                    outputMsg.payload.source = {
                                         name: camMessage.message.message.source.simpleItem.$.Name,
                                         value: camMessage.message.message.source.simpleItem.$.Value
                                     }
                                 }
                             }
-                            
+
                             //KEY
                             if (camMessage.message.message.key) {
-                                outputMsg.key = camMessage.message.message.key;
+                                outputMsg.payload.key = camMessage.message.message.key;
                             }
 
                             // DATA (Name:Value)
                             if (camMessage.message.message.data && camMessage.message.message.data.simpleItem) {
                                 if (Array.isArray(camMessage.message.message.data.simpleItem)) {
-                                    outputMsg.data = [];
+                                    outputMsg.payload.data = [];
                                     for (var x  = 0; x < camMessage.message.message.data.simpleItem.length; x++) {
-                                        outputMsg.data.push({
+                                        outputMsg.payload.data.push({
                                             name: camMessage.message.message.data.simpleItem[x].$.Name,
                                             value: camMessage.message.message.data.simpleItem[x].$.Value
                                         })
                                     }
-                                    // For multiple data items, payload is a key:value map
-                                    outputMsg.payload = {};
-                                    outputMsg.data.forEach(function(item) { outputMsg.payload[item.name] = item.value; });
                                 }
                                 else {
-                                    outputMsg.data = {
+                                    outputMsg.payload.data = {
                                         name: camMessage.message.message.data.simpleItem.$.Name,
                                         value: camMessage.message.message.data.simpleItem.$.Value
                                     }
-                                    // For a single data item, payload is the value directly
-                                    outputMsg.payload = outputMsg.data.value;
                                 }
                             }
                             else if (camMessage.message.message.data && camMessage.message.message.data.elementItem) {
-                                outputMsg.data = {
-                                    dataName: 'elementItem',
-                                    dataValue: JSON.stringify(camMessage.message.message.data.elementItem)
+                                outputMsg.payload.data = {
+                                    name: 'elementItem',
+                                    value: JSON.stringify(camMessage.message.message.data.elementItem)
                                 }
-                                outputMsg.payload = outputMsg.data.dataValue;
                             }
 
-                            // As soon as we get an event from the camera, we will send it to the output of this node
-                            node.send(outputMsg);
+                            // Resolve the raw detection value from data (single item or first of array)
+                            var rawDetected = outputMsg.payload.data
+                                ? (Array.isArray(outputMsg.payload.data)
+                                    ? outputMsg.payload.data[0].value
+                                    : outputMsg.payload.data.value)
+                                : false;
+
+                            // Use topic as the deduplication key (all grid cells share the same topic)
+                            var cacheKey = eventTopic;
+
+                            if (outputMsg.payload.property === 'Changed') {
+                                // Standard camera: "Changed" events carry the real boolean value.
+                                // Deduplicate: only forward if the value actually changed.
+                                var motionNow = !!rawDetected;
+                                if (node.eventMotionActive[cacheKey] !== motionNow) {
+                                    node.eventMotionActive[cacheKey] = motionNow;
+                                    outputMsg.payload.detected = motionNow;
+                                    node.send(outputMsg);
+                                }
+                            } else {
+                                // Non-standard camera (e.g. Tapo C225, sends only "Initialized" events
+                                // continuously while motion is active, never "Changed" events).
+                                // Strategy:
+                                //   - Track if ANY event in a 300ms window has a true detection value
+                                //   - Emit ONE message (detected:true) when detection starts
+                                //   - Reset a 5s watchdog on every batch; fire detected:false when silent
+                                if (rawDetected === true) {
+                                    node.eventBatchHasTrue[cacheKey] = true;
+                                }
+                                // Only start ONE debounce timer per batch window
+                                if (!node.eventBatchActive[cacheKey]) {
+                                    node.eventBatchActive[cacheKey] = true;
+                                    var batchMsg = outputMsg;
+                                    node.eventDebounceTimers[cacheKey] = setTimeout(function() {
+                                        node.eventBatchActive[cacheKey] = false;
+                                        var detected = node.eventBatchHasTrue[cacheKey];
+                                        node.eventBatchHasTrue[cacheKey] = false;
+
+                                        if (detected && !node.eventMotionActive[cacheKey]) {
+                                            // First detection in this presence window: emit once
+                                            node.eventMotionActive[cacheKey] = true;
+                                            batchMsg.payload.detected = true;
+                                            node.send(batchMsg);
+                                        }
+
+                                        if (node.eventMotionActive[cacheKey]) {
+                                            // Reset watchdog — camera sends every ~1s while active;
+                                            // 5s silence means the person has left
+                                            clearTimeout(node.eventWatchdogTimers[cacheKey]);
+                                            node.eventWatchdogTimers[cacheKey] = setTimeout(function() {
+                                                node.eventMotionActive[cacheKey] = false;
+                                                node.send({ topic: eventTopic, payload: { detected: false, property: 'timeout' } });
+                                            }, 5000);
+                                        }
+                                    }, 300);
+                                }
+                            }
                         }
                         
                         // Start listening to events from the camera
@@ -206,6 +248,15 @@
                         // Stop listening to events from the camera
                         node.deviceConfig.cam.removeListener('event', node.eventListener);
                         node.eventListener = null;
+
+                        // Clear all debounce and watchdog timers
+                        Object.values(node.eventDebounceTimers || {}).forEach(clearTimeout);
+                        Object.values(node.eventWatchdogTimers || {}).forEach(clearTimeout);
+                        node.eventDebounceTimers = {};
+                        node.eventWatchdogTimers = {};
+                        node.eventMotionActive   = {};
+                        node.eventBatchHasTrue   = {};
+                        node.eventBatchActive    = {};
                         
                         // Overwrite the device status text
                         node.status({fill:"green",shape:"ring",text:"not listening"}); 

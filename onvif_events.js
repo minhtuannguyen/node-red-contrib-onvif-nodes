@@ -128,7 +128,6 @@
 
                             var outputMsg = {
                                 topic: eventTopic,
-                                payload: {},
                                 time: camMessage.message.message.$.UtcTime,
                                 property: camMessage.message.message.$.PropertyOperation // Initialized, Deleted or Changed but missing/undefined on the Avigilon 4 channel encoder
                             };
@@ -153,7 +152,6 @@
                                         value: camMessage.message.message.source.simpleItem.$.Value
                                     }
                                 }
-                                outputMsg.payload.source = outputMsg.source;
                             }
                             
                             //KEY
@@ -171,21 +169,25 @@
                                             value: camMessage.message.message.data.simpleItem[x].$.Value
                                         })
                                     }
+                                    // For multiple data items, payload is a key:value map
+                                    outputMsg.payload = {};
+                                    outputMsg.data.forEach(function(item) { outputMsg.payload[item.name] = item.value; });
                                 }
                                 else {
                                     outputMsg.data = {
                                         name: camMessage.message.message.data.simpleItem.$.Name,
                                         value: camMessage.message.message.data.simpleItem.$.Value
                                     }
+                                    // For a single data item, payload is the value directly
+                                    outputMsg.payload = outputMsg.data.value;
                                 }
-                                outputMsg.payload.data = outputMsg.data;
                             }
                             else if (camMessage.message.message.data && camMessage.message.message.data.elementItem) {
                                 outputMsg.data = {
                                     dataName: 'elementItem',
                                     dataValue: JSON.stringify(camMessage.message.message.data.elementItem)
                                 }
-                                outputMsg.payload.data = outputMsg.data;
+                                outputMsg.payload = outputMsg.data.dataValue;
                             }
 
                             // As soon as we get an event from the camera, we will send it to the output of this node

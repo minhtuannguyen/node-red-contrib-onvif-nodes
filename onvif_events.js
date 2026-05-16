@@ -21,6 +21,9 @@
     function OnVifEventsNode(config) {
         RED.nodes.createNode(this, config);
         this.action = config.action;
+        // Watchdog timeout in ms — must exceed camera's event batch interval.
+        // Default 30s; configurable so users can tune per camera.
+        this.motionTimeout = Math.max(5, (parseInt(config.motionTimeout, 10) || 30)) * 1000;
 
         var node = this;
         
@@ -221,7 +224,7 @@
                                         node.eventWatchdogTimers[cacheKey] = setTimeout(function() {
                                             node.eventMotionActive[cacheKey] = false;
                                             node.send({ topic: eventTopic, payload: { detected: false, property: 'timeout' } });
-                                        }, 10000);
+                                        }, node.motionTimeout);
                                     }
 
                                     node.eventDebounceTimers[cacheKey] = setTimeout(function() {
@@ -239,7 +242,7 @@
                                             node.eventWatchdogTimers[cacheKey] = setTimeout(function() {
                                                 node.eventMotionActive[cacheKey] = false;
                                                 node.send({ topic: eventTopic, payload: { detected: false, property: 'timeout' } });
-                                            }, 10000);
+                                            }, node.motionTimeout);
                                         }
                                     }, 300);
                                 }

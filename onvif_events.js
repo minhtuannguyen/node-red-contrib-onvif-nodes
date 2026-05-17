@@ -103,6 +103,9 @@
                         node.eventBatchActive     = {};  // tracks if a debounce timer is currently running
                         
                         node.eventListener = function(camMessage) {
+                            // Camera is alive — reset reconnect backoff so next offline period starts fresh.
+                            node.eventReconnectDelay = 30000;
+
                             // Strip namespaces from topic (e.g. tns1:RuleEngine/tns1:PeopleDetector/People)
                             var parts = camMessage.topic._.split('/');
                             var eventTopic = '';
@@ -249,6 +252,40 @@
                             }
                         }
                         
+                        node.eventListeningActive = true;
+                        // Exponential backoff delay for eventsError reconnects (30s → 60s → 120s cap).
+                        // Reset to 30s whenever the camera successfully delivers an event.
+                        node.eventReconnectDelay = 30000;
+
+                        // When the camera goes offline (e.g. Tapo privacy ON), the onvif
+                        // library's _restartEventRequest fires ~89 rapid retries (starting at
+                        // 10ms, growing 1.111× each time up to 2 min) — enough to overwhelm
+                        // the C225's embedded HTTP server and cause it to freeze.
+                        // Fix: remove our 'event' listener on the first error so the library's
+                        // next retry (~10ms away) sees 0 listeners and self-terminates.
+                        // We then re-add the listener with exponential backoff:
+                        //   30s → 60s → 120s (cap) — ~16 retries per 8h overnight.
+                        node.eventsErrorListener = function(err) {
+                            if (!node.eventListeningActive) return;
+                            node.deviceConfig.cam.removeListener('event', node.eventListener);
+                            var delay = node.eventReconnectDelay;
+                            node.eventReconnectDelay = Math.min(node.eventReconnectDelay * 2, 120000);
+                            node.status({fill:"yellow", shape:"ring", text:"camera offline, retry in " + Math.round(delay / 1000) + "s"});
+                            node.warn('ONVIF camera offline (' + (err && err.message || err) + '), retrying in ' + Math.round(delay / 1000) + 's');
+                            clearTimeout(node.eventReconnectTimer);
+                            node.eventReconnectTimer = setTimeout(function() {
+                                if (!node.eventListeningActive) return;
+                                node.status({fill:"yellow", shape:"dot", text:"reconnecting..."});
+                                node.deviceConfig.cam.on('event', node.eventListener);
+                                // Kick the pull loop in case the library does not auto-start
+                                // when a listener is re-added after it previously stopped.
+                                if (typeof node.deviceConfig.cam._eventRequest === 'function') {
+                                    node.deviceConfig.cam._eventRequest();
+                                }
+                            }, delay);
+                        };
+                        node.deviceConfig.cam.on('eventsError', node.eventsErrorListener);
+
                         // Start listening to events from the camera
                         node.deviceConfig.cam.on('event', node.eventListener);
                         break;
@@ -258,16 +295,18 @@
                             return;
                         }
 
-                        // Remove the JS listener. The library's _eventRequest loop
-                        // checks listeners('event').length on every cycle and calls
-                        // unsubscribe() automatically when count reaches 0 — but only
-                        // AFTER the current in-flight PullMessages request returns
-                        // (which can be up to MessageTimeout seconds, typically 60s).
-                        // We therefore also call unsubscribe() eagerly so the camera
-                        // frees the pull-point subscription immediately. Without this,
-                        // toggling Tapo privacy mode while the pull loop has an open
-                        // HTTPS connection can overwhelm the C225's embedded HTTP
-                        // server (it has very limited concurrency) and cause it to freeze.
+                        // Stop the error-driven reconnect loop and clean up error listener.
+                        node.eventListeningActive = false;
+                        clearTimeout(node.eventReconnectTimer);
+                        if (node.eventsErrorListener) {
+                            node.deviceConfig.cam.removeListener('eventsError', node.eventsErrorListener);
+                            node.eventsErrorListener = null;
+                        }
+
+                        // Remove the JS listener and eagerly unsubscribe so the camera
+                        // frees the pull-point subscription immediately (rather than
+                        // waiting up to MessageTimeout seconds for the in-flight
+                        // PullMessages request to return).
                         node.deviceConfig.cam.removeListener('event', node.eventListener);
                         node.eventListener = null;
 
@@ -352,9 +391,17 @@
             if (node.listener) {
                 node.deviceConfig.removeListener("onvif_status", node.listener);
             }
-            
+
+            // Stop the error-driven reconnect loop and clean up
+            node.eventListeningActive = false;
+            clearTimeout(node.eventReconnectTimer);
+            if (node.eventsErrorListener && node.deviceConfig) {
+                node.deviceConfig.cam.removeListener('eventsError', node.eventsErrorListener);
+                node.eventsErrorListener = null;
+            }
+
             // Stop listening to events from the camera
-            if (node.eventListener) {
+            if (node.eventListener && node.deviceConfig) {
                 node.deviceConfig.cam.removeListener('event', node.eventListener);
                 node.eventListener = null;
             }

@@ -258,9 +258,24 @@
                             return;
                         }
 
-                        // Stop listening to events from the camera
+                        // Remove the JS listener. The library's _eventRequest loop
+                        // checks listeners('event').length on every cycle and calls
+                        // unsubscribe() automatically when count reaches 0 — but only
+                        // AFTER the current in-flight PullMessages request returns
+                        // (which can be up to MessageTimeout seconds, typically 60s).
+                        // We therefore also call unsubscribe() eagerly so the camera
+                        // frees the pull-point subscription immediately. Without this,
+                        // toggling Tapo privacy mode while the pull loop has an open
+                        // HTTPS connection can overwhelm the C225's embedded HTTP
+                        // server (it has very limited concurrency) and cause it to freeze.
                         node.deviceConfig.cam.removeListener('event', node.eventListener);
                         node.eventListener = null;
+
+                        if (node.deviceConfig.cam.events && node.deviceConfig.cam.events.subscription) {
+                            node.deviceConfig.cam.unsubscribe(function(err) {
+                                if (err) { node.warn('ONVIF unsubscribe: ' + err.message); }
+                            });
+                        }
 
                         // Clear all debounce and watchdog timers
                         Object.values(node.eventDebounceTimers || {}).forEach(clearTimeout);
